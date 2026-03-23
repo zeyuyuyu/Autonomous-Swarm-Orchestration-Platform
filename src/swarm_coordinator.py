@@ -1,111 +1,163 @@
-import asyncio
 from typing import Dict, List, Optional
+import uuid
+import time
 from dataclasses import dataclass
 from enum import Enum
-import logging
 
-class SwarmNodeStatus(Enum):
-    ACTIVE = 'active'
-    DEGRADED = 'degraded'
-    OFFLINE = 'offline'
+class SwarmRole(Enum):
+    SCOUT = 'scout'
+    WORKER = 'worker'
+    COORDINATOR = 'coordinator'
+    RELAY = 'relay'
 
 @dataclass
-class SwarmNode:
+class SwarmAgent:
     id: str
-    status: SwarmNodeStatus
-    load: float
-    last_heartbeat: float
+    role: SwarmRole
+    position: tuple
+    status: str
     capabilities: List[str]
+    current_task: Optional[str] = None
+
+@dataclass
+class Task:
+    id: str
+    type: str
+    priority: int
+    requirements: List[str]
+    assigned_to: Optional[str] = None
+    status: str = 'pending'
 
 class SwarmCoordinator:
     def __init__(self):
-        self.nodes: Dict[str, SwarmNode] = {}
-        self.min_nodes = 3
-        self.load_threshold = 0.8
-        self.heartbeat_timeout = 30.0
-        self.logger = logging.getLogger(__name__)
+        self.agents: Dict[str, SwarmAgent] = {}
+        self.tasks: Dict[str, Task] = {}
+        self.role_distributions = {
+            SwarmRole.SCOUT: 0.2,
+            SwarmRole.WORKER: 0.6,
+            SwarmRole.RELAY: 0.15,
+            SwarmRole.COORDINATOR: 0.05
+        }
 
-    async def register_node(self, node_id: str, capabilities: List[str]) -> bool:
-        if node_id in self.nodes:
-            return False
+    def register_agent(self, position: tuple, capabilities: List[str]) -> str:
+        agent_id = str(uuid.uuid4())
+        role = self._determine_optimal_role()
         
-        self.nodes[node_id] = SwarmNode(
-            id=node_id,
-            status=SwarmNodeStatus.ACTIVE,
-            load=0.0,
-            last_heartbeat=asyncio.get_event_loop().time(),
+        self.agents[agent_id] = SwarmAgent(
+            id=agent_id,
+            role=role,
+            position=position,
+            status='active',
             capabilities=capabilities
         )
-        self.logger.info(f'Node {node_id} registered with capabilities {capabilities}')
-        return True
+        return agent_id
 
-    async def update_node_status(self, node_id: str, load: float) -> None:
-        if node_id not in self.nodes:
-            return
-
-        node = self.nodes[node_id]
-        node.load = load
-        node.last_heartbeat = asyncio.get_event_loop().time()
-
-        if load > self.load_threshold:
-            node.status = SwarmNodeStatus.DEGRADED
-            await self.rebalance_load()
-
-    async def rebalance_load(self) -> None:
-        active_nodes = [n for n in self.nodes.values() 
-                       if n.status == SwarmNodeStatus.ACTIVE]
+    def _determine_optimal_role(self) -> SwarmRole:
+        current_distribution = self._get_role_distribution()
         
-        if not active_nodes:
-            self.logger.error('No active nodes available for load balancing')
-            return
-
-        total_load = sum(n.load for n in active_nodes)
-        target_load = total_load / len(active_nodes)
-
-        for node in active_nodes:
-            if node.load > target_load * 1.2:  # 20% above target
-                await self.migrate_tasks(node, target_load)
-
-    async def migrate_tasks(self, overloaded_node: SwarmNode, target_load: float) -> None:
-        candidates = [
-            n for n in self.nodes.values()
-            if n.status == SwarmNodeStatus.ACTIVE 
-            and n.load < target_load
-            and n.id != overloaded_node.id
-        ]
-
-        if not candidates:
-            return
-
-        # Sort by current load ascending
-        candidates.sort(key=lambda x: x.load)
+        # Find the role that's most under-represented
+        target_role = SwarmRole.WORKER
+        max_deficit = -1
         
-        excess_load = overloaded_node.load - target_load
-        self.logger.info(f'Migrating {excess_load:.2f} load from {overloaded_node.id}')
+        for role, target_ratio in self.role_distributions.items():
+            current_ratio = current_distribution.get(role, 0)
+            deficit = target_ratio - current_ratio
+            if deficit > max_deficit:
+                max_deficit = deficit
+                target_role = role
+                
+        return target_role
 
-    async def monitor_health(self) -> None:
-        while True:
-            current_time = asyncio.get_event_loop().time()
+    def _get_role_distribution(self) -> Dict[SwarmRole, float]:
+        total_agents = len(self.agents)
+        if total_agents == 0:
+            return {}
             
-            for node_id, node in list(self.nodes.items()):
-                if current_time - node.last_heartbeat > self.heartbeat_timeout:
-                    node.status = SwarmNodeStatus.OFFLINE
-                    self.logger.warning(f'Node {node_id} marked as offline')
-                    
-                    if len([n for n in self.nodes.values() 
-                           if n.status == SwarmNodeStatus.ACTIVE]) < self.min_nodes:
-                        self.logger.error('Swarm below minimum node threshold!')
+        distribution = {}
+        for role in SwarmRole:
+            count = sum(1 for agent in self.agents.values() if agent.role == role)
+            distribution[role] = count / total_agents
+        return distribution
 
-            await asyncio.sleep(5)
+    def add_task(self, task_type: str, requirements: List[str], priority: int = 1) -> str:
+        task_id = str(uuid.uuid4())
+        self.tasks[task_id] = Task(
+            id=task_id,
+            type=task_type,
+            priority=priority,
+            requirements=requirements
+        )
+        self._assign_tasks()
+        return task_id
 
-    def get_best_node(self, required_capabilities: List[str]) -> Optional[SwarmNode]:
-        candidates = [
-            n for n in self.nodes.values()
-            if n.status == SwarmNodeStatus.ACTIVE
-            and all(cap in n.capabilities for cap in required_capabilities)
+    def _assign_tasks(self):
+        # Sort tasks by priority
+        pending_tasks = sorted(
+            [task for task in self.tasks.values() if task.status == 'pending'],
+            key=lambda x: x.priority,
+            reverse=True
+        )
+        
+        # Find available agents
+        available_agents = [
+            agent for agent in self.agents.values()
+            if agent.current_task is None and agent.status == 'active'
         ]
+        
+        for task in pending_tasks:
+            best_agent = None
+            best_score = -1
+            
+            for agent in available_agents:
+                score = self._calculate_assignment_score(agent, task)
+                if score > best_score:
+                    best_score = score
+                    best_agent = agent
+            
+            if best_agent:
+                task.assigned_to = best_agent.id
+                task.status = 'assigned'
+                best_agent.current_task = task.id
+                available_agents.remove(best_agent)
 
-        if not candidates:
+    def _calculate_assignment_score(self, agent: SwarmAgent, task: Task) -> float:
+        # Calculate capability match
+        capability_score = sum(1 for req in task.requirements if req in agent.capabilities)
+        capability_score /= max(len(task.requirements), 1)
+        
+        # Role suitability
+        role_weights = {
+            SwarmRole.WORKER: 1.0 if task.type == 'work' else 0.2,
+            SwarmRole.SCOUT: 1.0 if task.type == 'explore' else 0.3,
+            SwarmRole.RELAY: 1.0 if task.type == 'communicate' else 0.4,
+            SwarmRole.COORDINATOR: 0.5
+        }
+        
+        role_score = role_weights.get(agent.role, 0.1)
+        
+        return (capability_score * 0.7) + (role_score * 0.3)
+
+    def update_task_status(self, task_id: str, status: str):
+        if task_id in self.tasks:
+            task = self.tasks[task_id]
+            task.status = status
+            
+            if status in ['completed', 'failed']:
+                if task.assigned_to:
+                    agent = self.agents.get(task.assigned_to)
+                    if agent:
+                        agent.current_task = None
+                task.assigned_to = None
+
+    def get_agent_status(self, agent_id: str) -> Optional[Dict]:
+        agent = self.agents.get(agent_id)
+        if not agent:
             return None
-
-        return min(candidates, key=lambda x: x.load)
+            
+        return {
+            'id': agent.id,
+            'role': agent.role.value,
+            'position': agent.position,
+            'status': agent.status,
+            'current_task': agent.current_task
+        }
