@@ -1,104 +1,52 @@
+import random
 import time
-from typing import Dict, List, Optional
-from dataclasses import dataclass
-import logging
-
-@dataclass
-class SwarmNode:
-    id: str
-    ip: str
-    load: float = 0.0
-    last_heartbeat: float = 0.0
-    status: str = 'active'
 
 class SwarmCoordinator:
+    def __init__(self, swarm_size=10):
+        self.swarm_size = swarm_size
+        self.swarm = [self.create_agent() for _ in range(swarm_size)]
+        self.load_balancer = LoadBalancer(self.swarm)
+
+    def create_agent(self):
+        return Agent()
+
+    def monitor_swarm(self):
+        while True:
+            for agent in self.swarm:
+                if not agent.is_healthy():
+                    self.load_balancer.replace_agent(agent)
+            time.sleep(60)  # Check swarm health every minute
+
+    def execute_task(self, task):
+        available_agents = self.load_balancer.get_available_agents()
+        if available_agents:
+            agent = random.choice(available_agents)
+            agent.execute_task(task)
+        else:
+            print("No available agents to execute the task.")
+
+class Agent:
     def __init__(self):
-        self.nodes: Dict[str, SwarmNode] = {}
-        self.health_check_interval = 5.0  # seconds
-        self.node_timeout = 15.0  # seconds
-        logging.basicConfig(level=logging.INFO)
-        self.logger = logging.getLogger(__name__)
+        self.health = 100
 
-    def register_node(self, node_id: str, ip: str) -> None:
-        """Register a new node in the swarm"""
-        self.nodes[node_id] = SwarmNode(
-            id=node_id,
-            ip=ip,
-            last_heartbeat=time.time()
-        )
-        self.logger.info(f'Node {node_id} registered with IP {ip}')
+    def is_healthy(self):
+        return self.health > 0
 
-    def update_node_health(self, node_id: str, load: float) -> None:
-        """Update node health metrics"""
-        if node_id in self.nodes:
-            self.nodes[node_id].load = load
-            self.nodes[node_id].last_heartbeat = time.time()
-            self.nodes[node_id].status = 'active'
+    def execute_task(self, task):
+        print(f"Agent executing task: {task}")
+        self.health -= random.randint(10, 30)  # Simulating task impact on agent health
 
-    def check_node_health(self) -> List[str]:
-        """Return list of failed nodes"""
-        current_time = time.time()
-        failed_nodes = []
+class LoadBalancer:
+    def __init__(self, swarm):
+        self.swarm = swarm
 
-        for node_id, node in self.nodes.items():
-            if current_time - node.last_heartbeat > self.node_timeout:
-                node.status = 'failed'
-                failed_nodes.append(node_id)
-                self.logger.warning(f'Node {node_id} appears to be down')
+    def get_available_agents(self):
+        return [agent for agent in self.swarm if agent.is_healthy()]
 
-        return failed_nodes
+    def replace_agent(self, unhealthy_agent):
+        print(f"Replacing unhealthy agent: {unhealthy_agent}")
+        index = self.swarm.index(unhealthy_agent)
+        self.swarm[index] = self.create_new_agent()
 
-    def get_optimal_node(self) -> Optional[SwarmNode]:
-        """Return node with lowest load for task assignment"""
-        active_nodes = [
-            node for node in self.nodes.values()
-            if node.status == 'active'
-        ]
-        
-        if not active_nodes:
-            return None
-            
-        return min(active_nodes, key=lambda x: x.load)
-
-    def rebalance_load(self) -> Dict[str, List[str]]:
-        """Redistribute tasks from heavily loaded nodes"""
-        migrations = {}
-        high_load_threshold = 0.8
-
-        # Find overloaded nodes
-        overloaded = [
-            node for node in self.nodes.values()
-            if node.status == 'active' and node.load > high_load_threshold
-        ]
-
-        # Find available capacity
-        available = [
-            node for node in self.nodes.values()
-            if node.status == 'active' and node.load < high_load_threshold
-        ]
-
-        for source in overloaded:
-            if not available:
-                break
-                
-            target = min(available, key=lambda x: x.load)
-            migrations[source.id] = [target.id]
-            
-            # Update theoretical loads
-            load_to_move = (source.load - high_load_threshold) / 2
-            source.load -= load_to_move
-            target.load += load_to_move
-
-        return migrations
-
-    def get_swarm_status(self) -> Dict[str, dict]:
-        """Return current status of all nodes"""
-        return {
-            node_id: {
-                'ip': node.ip,
-                'load': node.load,
-                'status': node.status,
-                'last_heartbeat': node.last_heartbeat
-            }
-            for node_id, node in self.nodes.items()
-        }
+    def create_new_agent(self):
+        return Agent()
