@@ -1,62 +1,90 @@
-import time
-import random
-from typing import List
+import asyncio
+from typing import Dict, List, Optional
+from dataclasses import dataclass
+
+@dataclass
+class SwarmNode:
+    id: str
+    capacity: float
+    current_load: float
+    tasks: List[str]
+    status: str
 
 class SwarmCoordinator:
-    def __init__(self, num_agents: int):
-        self.num_agents = num_agents
-        self.agents = [Agent(f'Agent_{i}') for i in range(num_agents)]
-        self.task_queue = []
-        self.task_assignments = {}
+    def __init__(self):
+        self.nodes: Dict[str, SwarmNode] = {}
+        self.task_queue: List[str] = []
+        self.load_threshold = 0.8
 
-    def add_task(self, task: dict):
-        self.task_queue.append(task)
-        self.schedule_tasks()
+    async def register_node(self, node_id: str, capacity: float) -> None:
+        self.nodes[node_id] = SwarmNode(
+            id=node_id,
+            capacity=capacity,
+            current_load=0.0,
+            tasks=[],
+            status='active'
+        )
 
-    def schedule_tasks(self):
+    async def remove_node(self, node_id: str) -> None:
+        if node_id in self.nodes:
+            tasks_to_reassign = self.nodes[node_id].tasks
+            self.task_queue.extend(tasks_to_reassign)
+            del self.nodes[node_id]
+            await self.rebalance_tasks()
+
+    def get_least_loaded_node(self) -> Optional[str]:
+        available_nodes = [
+            (node_id, node) for node_id, node in self.nodes.items()
+            if node.current_load / node.capacity < self.load_threshold
+        ]
+        if not available_nodes:
+            return None
+        return min(available_nodes, key=lambda x: x[1].current_load / x[1].capacity)[0]
+
+    async def assign_task(self, task_id: str, load_value: float) -> bool:
+        target_node = self.get_least_loaded_node()
+        if not target_node:
+            self.task_queue.append(task_id)
+            return False
+
+        node = self.nodes[target_node]
+        node.tasks.append(task_id)
+        node.current_load += load_value
+        return True
+
+    async def complete_task(self, node_id: str, task_id: str, load_value: float) -> None:
+        if node_id in self.nodes:
+            node = self.nodes[node_id]
+            if task_id in node.tasks:
+                node.tasks.remove(task_id)
+                node.current_load -= load_value
+                await self.rebalance_tasks()
+
+    async def rebalance_tasks(self) -> None:
         while self.task_queue:
-            task = self.task_queue.pop(0)
-            available_agents = [agent for agent in self.agents if not agent.is_busy()]
-            if available_agents:
-                agent = self.select_agent(available_agents)
-                agent.assign_task(task)
-                self.task_assignments[task['id']] = agent.name
+            task_id = self.task_queue[0]
+            if await self.assign_task(task_id, 1.0):  # Assuming default load of 1.0
+                self.task_queue.pop(0)
             else:
-                self.task_queue.append(task)
-                time.sleep(1)
+                break
 
-    def select_agent(self, agents: List[Agent]) -> Agent:
-        # Implement a load balancing algorithm to select the best agent
-        # e.g., round-robin, least-busy, etc.
-        return random.choice(agents)
+    async def monitor_health(self) -> None:
+        while True:
+            for node_id, node in self.nodes.items():
+                if node.current_load / node.capacity > 0.95:
+                    print(f'Warning: Node {node_id} is approaching capacity')
+            await asyncio.sleep(10)
 
-    def get_task_status(self, task_id: str) -> str:
-        if task_id in self.task_assignments:
-            agent_name = self.task_assignments[task_id]
-            agent = next((a for a in self.agents if a.name == agent_name), None)
-            if agent:
-                return agent.get_task_status(task_id)
-        return 'Unassigned'
-
-class Agent:
-    def __init__(self, name: str):
-        self.name = name
-        self.current_task = None
-        self.start_time = 0
-
-    def assign_task(self, task: dict):
-        self.current_task = task
-        self.start_time = time.time()
-
-    def is_busy(self) -> bool:
-        return self.current_task is not None
-
-    def get_task_status(self, task_id: str) -> str:
-        if self.current_task and self.current_task['id'] == task_id:
-            elapsed_time = time.time() - self.start_time
-            if elapsed_time >= self.current_task['duration']:
-                self.current_task = None
-                return 'Completed'
-            else:
-                return 'In Progress'
-        return 'Unassigned'
+    def get_swarm_status(self) -> Dict:
+        return {
+            'active_nodes': len(self.nodes),
+            'pending_tasks': len(self.task_queue),
+            'total_load': sum(node.current_load for node in self.nodes.values()),
+            'nodes': {
+                node_id: {
+                    'load': node.current_load,
+                    'capacity': node.capacity,
+                    'task_count': len(node.tasks)
+                } for node_id, node in self.nodes.items()
+            }
+        }
