@@ -1,90 +1,48 @@
-import asyncio
-from typing import Dict, List, Optional
-from dataclasses import dataclass
-
-@dataclass
-class SwarmNode:
-    id: str
-    capacity: float
-    current_load: float
-    tasks: List[str]
-    status: str
+import numpy as np
 
 class SwarmCoordinator:
-    def __init__(self):
-        self.nodes: Dict[str, SwarmNode] = {}
-        self.task_queue: List[str] = []
-        self.load_threshold = 0.8
+    def __init__(self, swarm_size, env_dimensions):
+        self.swarm_size = swarm_size
+        self.env_dimensions = env_dimensions
+        self.swarm_positions = np.random.uniform(0, env_dimensions, (swarm_size, 2))
+        self.swarm_velocities = np.random.uniform(-1, 1, (swarm_size, 2))
+        self.obstacle_positions = []
+        self.obstacle_radii = []
 
-    async def register_node(self, node_id: str, capacity: float) -> None:
-        self.nodes[node_id] = SwarmNode(
-            id=node_id,
-            capacity=capacity,
-            current_load=0.0,
-            tasks=[],
-            status='active'
-        )
+    def update_swarm(self, dt):
+        """Update the positions and velocities of the swarm agents."""
+        self.swarm_positions += self.swarm_velocities * dt
+        self.swarm_positions = np.clip(self.swarm_positions, 0, self.env_dimensions)
+        self.avoid_obstacles()
+        self.maintain_cohesion()
+        self.avoid_collisions()
+        self.align_velocities()
 
-    async def remove_node(self, node_id: str) -> None:
-        if node_id in self.nodes:
-            tasks_to_reassign = self.nodes[node_id].tasks
-            self.task_queue.extend(tasks_to_reassign)
-            del self.nodes[node_id]
-            await self.rebalance_tasks()
+    def avoid_obstacles(self):
+        """Adjust the velocities of the swarm agents to avoid obstacles."""
+        for i in range(self.swarm_size):
+            for j in range(len(self.obstacle_positions)):
+                distance = np.linalg.norm(self.swarm_positions[i] - self.obstacle_positions[j])
+                if distance < self.obstacle_radii[j]:
+                    self.swarm_velocities[i] -= (self.swarm_positions[i] - self.obstacle_positions[j]) / distance
 
-    def get_least_loaded_node(self) -> Optional[str]:
-        available_nodes = [
-            (node_id, node) for node_id, node in self.nodes.items()
-            if node.current_load / node.capacity < self.load_threshold
-        ]
-        if not available_nodes:
-            return None
-        return min(available_nodes, key=lambda x: x[1].current_load / x[1].capacity)[0]
+    def maintain_cohesion(self):
+        """Adjust the velocities of the swarm agents to maintain cohesion."""
+        center_of_mass = np.mean(self.swarm_positions, axis=0)
+        for i in range(self.swarm_size):
+            self.swarm_velocities[i] += (center_of_mass - self.swarm_positions[i]) * 0.1
 
-    async def assign_task(self, task_id: str, load_value: float) -> bool:
-        target_node = self.get_least_loaded_node()
-        if not target_node:
-            self.task_queue.append(task_id)
-            return False
+    def avoid_collisions(self):
+        """Adjust the velocities of the swarm agents to avoid collisions."""
+        for i in range(self.swarm_size):
+            for j in range(i+1, self.swarm_size):
+                distance = np.linalg.norm(self.swarm_positions[i] - self.swarm_positions[j])
+                if distance < 2:
+                    self.swarm_velocities[i] -= (self.swarm_positions[i] - self.swarm_positions[j]) / distance
+                    self.swarm_velocities[j] += (self.swarm_positions[i] - self.swarm_positions[j]) / distance
 
-        node = self.nodes[target_node]
-        node.tasks.append(task_id)
-        node.current_load += load_value
-        return True
-
-    async def complete_task(self, node_id: str, task_id: str, load_value: float) -> None:
-        if node_id in self.nodes:
-            node = self.nodes[node_id]
-            if task_id in node.tasks:
-                node.tasks.remove(task_id)
-                node.current_load -= load_value
-                await self.rebalance_tasks()
-
-    async def rebalance_tasks(self) -> None:
-        while self.task_queue:
-            task_id = self.task_queue[0]
-            if await self.assign_task(task_id, 1.0):  # Assuming default load of 1.0
-                self.task_queue.pop(0)
-            else:
-                break
-
-    async def monitor_health(self) -> None:
-        while True:
-            for node_id, node in self.nodes.items():
-                if node.current_load / node.capacity > 0.95:
-                    print(f'Warning: Node {node_id} is approaching capacity')
-            await asyncio.sleep(10)
-
-    def get_swarm_status(self) -> Dict:
-        return {
-            'active_nodes': len(self.nodes),
-            'pending_tasks': len(self.task_queue),
-            'total_load': sum(node.current_load for node in self.nodes.values()),
-            'nodes': {
-                node_id: {
-                    'load': node.current_load,
-                    'capacity': node.capacity,
-                    'task_count': len(node.tasks)
-                } for node_id, node in self.nodes.items()
-            }
-        }
+    def align_velocities(self):
+        """Adjust the velocities of the swarm agents to align with their neighbors."""
+        for i in range(self.swarm_size):
+            nearby_velocities = np.sum([self.swarm_velocities[j] for j in range(self.swarm_size) if np.linalg.norm(self.swarm_positions[i] - self.swarm_positions[j]) < 10], axis=0)
+            self.swarm_velocities[i] = (self.swarm_velocities[i] + nearby_velocities * 0.1) / 1.1
